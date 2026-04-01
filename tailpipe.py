@@ -1,46 +1,5 @@
 #!/usr/bin/env python3
-"""
-TCP Reverse Tunnel (Tailscale Funnel edition)
-=============================================
-
-Forwards an internal service (e.g. MSSQL) from a remote environment to
-your MacBook, using Tailscale Funnel as the public ingress point.
-No third server needed.
-
-Architecture:
-
-    Environment (agent) ──TLS──► Tailscale Funnel ──► MacBook (server)
-         │                                                │
-    connects to                                     local port you
-    internal MSSQL                                  connect to
-
-Two modes, one script:
-
-    server  — runs on your MacBook behind Tailscale Funnel
-    agent   — runs in the environment, connects out to the Funnel URL
-
-Setup:
-
-    # 1. On your MacBook, expose port 9000 via Funnel
-    tailscale funnel 9000
-
-    # 2. Start the server on your MacBook
-    python3 tunnel.py server --port 9000 --listen 1433 --token mysecret
-
-    # 3. In the environment
-    python3 tunnel.py agent --server your-machine.tail1234.ts.net --target localhost:1433 --token mysecret
-
-    # 4. Connect your SQL client to localhost:1433
-
-Protocol:
-
-    The agent opens a persistent control connection (header 0x01) over
-    TLS to the Funnel endpoint. When a local client connects to the
-    server's listen port, the server signals the agent (1 byte). The
-    agent opens a new TLS data connection (header 0x02) and bridges it
-    to the target service. The server bridges the data connection to
-    the local client.
-"""
+"""tailpipe — TCP reverse tunnel over Tailscale Funnel. See README.md."""
 
 from __future__ import annotations
 
@@ -407,7 +366,7 @@ def main() -> None:
     sub = parser.add_subparsers(dest="mode", required=True)
 
     # server
-    p_srv = sub.add_parser("server", help="Run on your MacBook (behind Tailscale Funnel)")
+    p_srv = sub.add_parser("server", help="Run on your machine (behind Tailscale Funnel)")
     p_srv.add_argument("--port", type=int, default=9000, help="Port Funnel delivers traffic to (default 9000)")
     p_srv.add_argument("--listen", default="1433", help="Local port for your SQL client (default 1433)")
     p_srv.add_argument("--token", default=None, help="Shared auth token (auto-generated if omitted)")
