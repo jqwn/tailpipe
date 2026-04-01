@@ -406,6 +406,9 @@ def main() -> None:
         print(f"  Run on remote:")
         print(f"    python tailpipe.py agent --server {hostname} --token {token} --target localhost:1433")
         print()
+        print(f"  Or with uv (no install needed):")
+        print(f"    uv run https://raw.githubusercontent.com/jqwn/tailpipe/main/tailpipe.py agent --server {hostname} --token {token} --target localhost:1433")
+        print()
 
         try:
             loop.run_until_complete(run_server(args.port, lh, lp, token))
