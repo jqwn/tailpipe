@@ -5,25 +5,25 @@ TCP reverse tunnel over Tailscale Funnel. Expose remote services (e.g. MSSQL, Po
 ## How it works
 
 ```
-Remote environment                       Your machine
+Remote environment A                     Your machine
 ┌────────────────┐                       ┌────────────────┐
-│                │  outbound TLS (443)   │                │
-│  agent ────────┼──────────────────────►│  server        │
-│    │           │  via Tailscale Funnel │    │           │
-│    ├─► MSSQL   │                       │    ├─► :1433   │
-│    ├─► Postgres│                       │    ├─► :5432   │
-│    └─► Redis   │                       │    └─► :6379   │
-│                │                       │                │
-└────────────────┘                       └────────────────┘
-                                              ▲
-                                              │
-                                         SQL client,
-                                         SSMS, etc.
+│  agent "db"    │  outbound TLS (443)   │                │
+│    ├─► MSSQL   ┼──────────────────────►│  server        │
+│    └─► Postgres│  via Tailscale Funnel │    ├─► :1433   │
+└────────────────┘                       │    ├─► :5432   │
+                                         │    ├─► :80     │
+Remote environment B                     │    └─► :6379   │
+┌────────────────┐                       │                │
+│  agent "web"   │                       └────────────────┘
+│    ├─► Web app ┼──────────────────────►      ▲
+│    └─► Redis   │                             │
+└────────────────┘                        SQL client,
+                                          browser, etc.
 ```
 
-The **agent** runs in the remote environment (behind firewalls, NAT, etc.) and makes a single outbound TLS connection to your Tailscale Funnel URL. It registers the services it can reach. The **server** runs on your machine and dynamically opens local ports for each registered service.
+The **server** runs on your machine and stays running. **Agents** run in remote environments and connect to the server, registering the services they can reach. The server dynamically opens local ports for each registered service.
 
-All connections are outbound from the agent — nothing needs to be opened on the remote firewall.
+Multiple agents can connect simultaneously from different environments. All connections are outbound from the agents — nothing needs to be opened on the remote firewall.
 
 ## Prerequisites
 
@@ -65,13 +65,27 @@ uv run https://raw.githubusercontent.com/jqwn/tailpipe/main/tailpipe.py agent \
 Tunnel as many services as you need through the same connection:
 
 ```bash
-python tailpipe.py agent --server your-machine.tailXXXX.ts.net --token <token> \
+python tailpipe.py agent --name db --server ... --token ... \
   --target mssql=localhost:1433 \
-  --target postgres=dbserver:5432 \
+  --target postgres=dbserver:5432
+```
+
+### Multiple agents
+
+Connect agents from different environments simultaneously:
+
+```bash
+# Environment A — database servers
+python tailpipe.py agent --name db --server ... --token ... \
+  --target mssql=DBSERVER:1433
+
+# Environment B — web services
+python tailpipe.py agent --name web --server ... --token ... \
+  --target app=localhost:80 \
   --target redis=localhost:6379
 ```
 
-The server dynamically opens a local port for each target. Need to add another service later? Just restart the agent with the extra `--target` — the server stays running.
+The server dynamically opens local ports for each target. Need to add another service? Just restart the agent with the extra `--target` — the server stays running and adjusts automatically.
 
 ### Target names are optional
 
@@ -97,9 +111,9 @@ python tailpipe.py server [OPTIONS]
 | `--bind` | `127.0.0.1` | Bind address for local listeners |
 | `-v` | | Verbose logging |
 
-The server has no port configuration — local ports are allocated automatically when the agent registers targets. It tries to match the target's port number (e.g. remote `:1433` → local `:1433`). If that port is in use, the OS picks an available one.
+The server has no port configuration — local ports are allocated automatically when agents register targets. It tries to match the target's port number (e.g. remote `:1433` → local `:1433`). If that port is in use, the OS picks an available one.
 
-The terminal shows a sticky display with the current port mappings and agent command, plus a scrolling log of recent activity.
+The terminal shows a sticky display with the current agent/port mappings and a scrolling log of recent activity.
 
 ### Agent
 
@@ -112,6 +126,7 @@ python tailpipe.py agent [OPTIONS]
 | `--server` | required | Tailscale Funnel hostname |
 | `--token` | required | Shared auth token (from server output) |
 | `--target` | required | `[name=]host:port` — repeatable |
+| `--name` | hostname | Agent name (must be unique across connected agents) |
 | `--port` | `443` | Funnel port |
 | `--no-tls` | | Disable TLS (local testing only) |
 | `--no-verify` | | Skip TLS certificate verification |
@@ -121,21 +136,22 @@ python tailpipe.py agent [OPTIONS]
 
 - **Single file, zero dependencies** — stdlib Python only, runs anywhere
 - **Multi-port** — tunnel multiple services through one connection
-- **Agent-driven** — agent declares targets, server allocates ports dynamically
+- **Multi-agent** — connect agents from different environments simultaneously
+- **Agent-driven** — agents declare targets, server allocates ports dynamically
 - **Auto Funnel management** — server starts/stops Tailscale Funnel automatically
 - **Auto port allocation** — server picks the best local port for each target
-- **Sticky TUI** — server terminal always shows current mappings + scrolling log
+- **Sticky TUI** — server terminal always shows current agent/port mappings
 - **Heartbeat** — detects stale connections within ~15s and auto-reconnects
-- **Auto-reconnect** — agent reconnects automatically if the connection drops
+- **Auto-reconnect** — agents reconnect automatically if the connection drops
 - **Token auth** — shared secret prevents unauthorized tunnel use
 - **Multi-client** — each client connection gets its own data channel
 
 ## Protocol
 
 1. Agent opens a persistent **control channel** (TLS) to the server via Funnel
-2. Agent sends a **registration frame** listing its available targets
-3. Server opens local listeners for each registered target
-4. When a local client connects, the server sends a **new-client signal** (with target index) over the control channel
-5. Agent opens a new **data channel** (TLS), connects it to the correct target service
+2. Agent sends a **registration frame** with its name and list of available targets
+3. Server validates (unique agent name, no target name conflicts) and opens local listeners
+4. When a local client connects, the server sends a **new-client signal** (with target index) to the owning agent's control channel
+5. Agent opens a new **data channel** (TLS) identifying itself and the target, then connects to the target service
 6. Server bridges the local client to the data channel
 7. Both sides exchange **heartbeat** pings every 15s to detect dead connections
