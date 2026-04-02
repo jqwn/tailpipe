@@ -341,12 +341,15 @@ async def run_server(funnel_port: int, token: str, hostname: str,
                         return
 
             ping_task = asyncio.create_task(_ping_loop())
+            read_task = asyncio.create_task(_read_loop())
             try:
-                await _read_loop()
-            except (ConnectionResetError, OSError):
-                pass
+                await asyncio.wait(
+                    [ping_task, read_task],
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
             finally:
                 ping_task.cancel()
+                read_task.cancel()
                 current = agents.get(agent_name)
                 if current and current["writer"] is writer:
                     log.info("Agent \"%s\" disconnected", agent_name)
