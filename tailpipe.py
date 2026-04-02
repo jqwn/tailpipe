@@ -25,6 +25,7 @@ DATA_CHANNEL = b"\x02"
 SIGNAL_NEW_CLIENT = b"\x01"
 SIGNAL_PING = b"\x02"
 SIGNAL_PONG = b"\x03"
+SIGNAL_DISCONNECT = b"\x04"
 TOKEN_MAX_LEN = 256
 
 HEARTBEAT_INTERVAL = 15
@@ -335,6 +336,9 @@ async def run_server(funnel_port: int, token: str, hostname: str,
                     data = await reader.read(4096)
                     if not data:
                         return
+                    if SIGNAL_DISCONNECT in data:
+                        log.info("Agent \"%s\" sent disconnect", agent_name)
+                        return
 
             ping_task = asyncio.create_task(_ping_loop())
             try:
@@ -343,8 +347,6 @@ async def run_server(funnel_port: int, token: str, hostname: str,
                 pass
             finally:
                 ping_task.cancel()
-                # Only unregister if this is still the active connection for this agent
-                # (avoids race when a new agent replaced us before we noticed disconnect)
                 current = agents.get(agent_name)
                 if current and current["writer"] is writer:
                     log.info("Agent \"%s\" disconnected", agent_name)
@@ -413,8 +415,15 @@ async def run_agent(server_host: str, server_port: int, agent_name: str,
     tls_ctx = make_tls_context(no_verify) if use_tls else None
     hostname = server_host if use_tls else None
     reg_json = json.dumps({"name": agent_name, "targets": targets}).encode()
+    shutdown = asyncio.Event()
 
-    while True:
+    loop = asyncio.get_running_loop()
+    if sys.platform != "win32":
+        for sig_name in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(sig_name, shutdown.set)
+
+    while not shutdown.is_set():
+        ctrl_w = None
         try:
             log.info("Connecting to %s:%d ...", server_host, server_port)
             ctrl_r, ctrl_w = await agent_connect(server_host, server_port, tls_ctx, hostname)
@@ -435,8 +444,7 @@ async def run_agent(server_host: str, server_port: int, agent_name: str,
                     except (ConnectionResetError, BrokenPipeError, OSError):
                         return
 
-            ping_task = asyncio.create_task(_ping_loop())
-            try:
+            async def _signal_loop():
                 while True:
                     sig = await ctrl_r.readexactly(1)
                     if sig == SIGNAL_NEW_CLIENT:
@@ -454,17 +462,37 @@ async def run_agent(server_host: str, server_port: int, agent_name: str,
                     elif sig == SIGNAL_PING:
                         ctrl_w.write(SIGNAL_PONG)
                         await ctrl_w.drain()
+
+            ping_task = asyncio.create_task(_ping_loop())
+            signal_task = asyncio.create_task(_signal_loop())
+            shutdown_task = asyncio.create_task(shutdown.wait())
+            try:
+                done, _ = await asyncio.wait(
+                    [signal_task, shutdown_task],
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if shutdown_task in done:
+                    log.info("Shutting down, notifying server...")
+                    try:
+                        ctrl_w.write(SIGNAL_DISCONNECT)
+                        await ctrl_w.drain()
+                    except (ConnectionResetError, BrokenPipeError, OSError):
+                        pass
             finally:
                 ping_task.cancel()
+                signal_task.cancel()
+                shutdown_task.cancel()
         except (ConnectionRefusedError, OSError, asyncio.IncompleteReadError) as exc:
             log.warning("Connection lost (%s), reconnecting in 3s ...", exc)
         finally:
-            try:
-                ctrl_w.close()
-                await ctrl_w.wait_closed()
-            except Exception:
-                pass
-        await asyncio.sleep(3)
+            if ctrl_w:
+                try:
+                    ctrl_w.close()
+                    await ctrl_w.wait_closed()
+                except Exception:
+                    pass
+        if not shutdown.is_set():
+            await asyncio.sleep(3)
 
 
 async def _agent_data_channel(server_host, server_port, agent_name,
@@ -552,11 +580,11 @@ def main():
     args = parser.parse_args()
 
     loop = asyncio.new_event_loop()
-    if sys.platform != "win32":
-        for sig_name in (signal.SIGINT, signal.SIGTERM):
-            loop.add_signal_handler(sig_name, lambda: sys.exit(0))
 
     if args.mode == "server":
+        if sys.platform != "win32":
+            for sig_name in (signal.SIGINT, signal.SIGTERM):
+                loop.add_signal_handler(sig_name, lambda: sys.exit(0))
         token = args.token or secrets.token_hex(16)
         hostname = get_tailscale_hostname()
         start_funnel(args.port)
