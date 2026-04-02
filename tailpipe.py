@@ -156,20 +156,20 @@ async def run_server(funnel_port: int, token: str, hostname: str,
             ]
         else:
             target_args = [f"--target {t['name']}={t['host']}:{t['port']}" for t in targets]
-            lines += ["  Run on remote:"]
-            lines.append(f"    python tailpipe.py agent --server {hostname} --token {token} \\")
-            for i, ta in enumerate(target_args):
-                suffix = " \\" if i < len(target_args) - 1 else ""
-                lines.append(f"      {ta}{suffix}")
             lines += [
+                "  Run on remote:",
+                f"    python tailpipe.py agent --server {hostname} --token {token} \\",
+                "      --target name=host:port [--target ...]",
                 "",
                 "  Or with uv:",
                 f"    uv run {RAW_URL} agent \\",
                 f"      --server {hostname} --token {token} \\",
+                "      --target name=host:port [--target ...]",
+                "",
+                "  Connected targets:",
             ]
             for i, ta in enumerate(target_args):
-                suffix = " \\" if i < len(target_args) - 1 else ""
-                lines.append(f"      {ta}{suffix}")
+                lines.append(f"    {ta}")
             lines += ["", "  Mappings:"]
             name_w = max(len(t["name"]) for t in targets)
             for t in targets:
